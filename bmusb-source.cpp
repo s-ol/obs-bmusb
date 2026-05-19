@@ -4,6 +4,8 @@
 #include <obs-module.h>
 #include <bmusb/bmusb.h>
 #include <iostream>
+#include <map>
+#include <mutex>
 
 using bmusb::BMUSBCapture;
 using bmusb::FrameAllocator;
@@ -13,10 +15,43 @@ using bmusb::AudioFormat;
 #define S_CARD_INDEX "card_index"
 #define S_PIXEL_FORMAT "pixel_format"
 
+/* 
+ * Workaround for bmusb library limitation:
+ * The current bmusb library does not release libusb handles or interfaces in its destructor.
+ * Re-opening a card after deleting its instance results in LIBUSB_ERROR_BUSY because the 
+ * interface remains claimed by a leaked handle. To fix this without modifying bmusb, 
+ * we manage capture instances as singletons per card_index and keep them alive globally.
+ */
+static std::map<int, BMUSBCapture *> global_instances;
+static std::mutex instance_mutex;
+static bool usb_thread_started = false;
+
+static BMUSBCapture *get_capture_instance(int card_index)
+{
+	std::lock_guard<std::mutex> lock(instance_mutex);
+
+	if (global_instances.count(card_index)) {
+		return global_instances[card_index];
+	}
+
+	if (card_index < 0 || (unsigned int)card_index >= BMUSBCapture::num_cards()) {
+		return nullptr;
+	}
+
+	BMUSBCapture *cap = new BMUSBCapture(card_index);
+	cap->configure_card();
+	if (!usb_thread_started) {
+		BMUSBCapture::start_bm_thread();
+		usb_thread_started = true;
+	}
+	cap->start_bm_capture();
+	global_instances[card_index] = cap;
+	return cap;
+}
+
 struct bmusb_inst {
 	obs_source_t            *source;
 	BMUSBCapture            *capture;
-	bool                    initialized;
 	int                     card_index;
 };
 
@@ -28,11 +63,16 @@ static const char *bmusb_getname(void *unused)
 
 static void bmusb_cleanup(struct bmusb_inst *rt)
 {
-	if (rt->initialized) {
-		rt->capture->stop_dequeue_thread();
-		delete rt->capture;
-		BMUSBCapture::stop_bm_thread();
-		rt->initialized = false;
+	if (rt->capture) {
+		// Library leaks handles on delete, so we keep instances alive.
+		// We set a "null" callback that just releases frames back to the allocator.
+		auto cap = rt->capture;
+		cap->set_frame_callback([cap](uint16_t, FrameAllocator::Frame v, size_t, VideoFormat,
+					      FrameAllocator::Frame a, size_t, AudioFormat) {
+			if (v.data) cap->get_video_frame_allocator()->release_frame(v);
+			if (a.data) cap->get_audio_frame_allocator()->release_frame(a);
+		});
+		rt->capture = nullptr;
 	}
 }
 
@@ -53,7 +93,7 @@ static void bmusb_update(void *data, obs_data_t *settings)
 	int card_index = (int)obs_data_get_int(settings, S_CARD_INDEX);
 	bmusb::PixelFormat pixel_format = (bmusb::PixelFormat)obs_data_get_int(settings, S_PIXEL_FORMAT);
 
-	if (rt->initialized && rt->card_index == card_index) {
+	if (rt->capture && rt->card_index == card_index) {
 		rt->capture->set_pixel_format(pixel_format);
 		return;
 	}
@@ -61,11 +101,12 @@ static void bmusb_update(void *data, obs_data_t *settings)
 	bmusb_cleanup(rt);
 
 	rt->card_index = card_index;
-	if (card_index >= BMUSBCapture::num_cards()) {
-		std::cerr << "Invalid card index: " << card_index << std::endl;
+	rt->capture = get_capture_instance(card_index);
+	if (!rt->capture) {
+		obs_source_output_video(rt->source, nullptr);  // Signal no video
 		return;
 	}
-	rt->capture = new BMUSBCapture(card_index);
+
 	rt->capture->set_pixel_format(pixel_format);
 	rt->capture->set_frame_callback(
 		[rt](uint16_t timecode,
@@ -138,13 +179,6 @@ static void bmusb_update(void *data, obs_data_t *settings)
 			rt->capture->get_audio_frame_allocator()->release_frame(audio_frame);
 		}
 	);
-
-	// Configure and start capture
-	rt->capture->configure_card();
-	BMUSBCapture::start_bm_thread();
-	rt->capture->start_bm_capture();
-
-	rt->initialized = true;
 }
 
 static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
@@ -197,4 +231,22 @@ extern "C" bool obs_module_load(void)
 {
 	obs_register_source(&bmusb_source_info);
 	return true;
+}
+
+extern "C" void obs_module_unload(void)
+{
+	std::lock_guard<std::mutex> lock(instance_mutex);
+
+	// Stop dequeue threads and delete all cached BMUSBCapture instances.
+	for (auto const& [card_idx, cap] : global_instances) {
+		if (cap) {
+			cap->stop_dequeue_thread(); // Stop the individual dequeue thread
+			delete cap; // Delete the BMUSBCapture object
+		}
+	}
+	global_instances.clear();
+	if (usb_thread_started) {
+		BMUSBCapture::stop_bm_thread();
+		usb_thread_started = false;
+	}
 }
