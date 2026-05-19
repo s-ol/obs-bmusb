@@ -10,10 +10,14 @@ using bmusb::FrameAllocator;
 using bmusb::VideoFormat;
 using bmusb::AudioFormat;
 
+#define S_CARD_INDEX "card_index"
+#define S_PIXEL_FORMAT "pixel_format"
+
 struct bmusb_inst {
 	obs_source_t            *source;
 	BMUSBCapture            *capture;
 	bool                    initialized;
+	int                     card_index;
 };
 
 static const char *bmusb_getname(void *unused)
@@ -22,28 +26,47 @@ static const char *bmusb_getname(void *unused)
 	return "Blackmagic USB3 source (bmusb)";
 }
 
+static void bmusb_cleanup(struct bmusb_inst *rt)
+{
+	if (rt->initialized) {
+		rt->capture->stop_dequeue_thread();
+		delete rt->capture;
+		BMUSBCapture::stop_bm_thread();
+		rt->initialized = false;
+	}
+}
+
 static void bmusb_destroy(void *data)
 {
-	struct bmusb_inst *rt = (bmusb_inst *) data;
+	struct bmusb_inst *rt = (bmusb_inst *)data;
 
 	if (rt) {
-		if (rt->initialized) {
-			rt->capture->stop_dequeue_thread();
-			delete rt->capture;
-			BMUSBCapture::stop_bm_thread();
-		}
+		bmusb_cleanup(rt);
 
 		bfree(rt);
 	}
 }
 
-static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
+static void bmusb_update(void *data, obs_data_t *settings)
 {
-	struct bmusb_inst *rt = (bmusb_inst *) bzalloc(sizeof(struct bmusb_inst));
-	rt->source = source;
+	struct bmusb_inst *rt = (struct bmusb_inst *)data;
+	int card_index = (int)obs_data_get_int(settings, S_CARD_INDEX);
+	bmusb::PixelFormat pixel_format = (bmusb::PixelFormat)obs_data_get_int(settings, S_PIXEL_FORMAT);
 
-	rt->capture = new BMUSBCapture(0); // @TODO select card
-	rt->capture->set_pixel_format(bmusb::PixelFormat_8BitYCbCr);
+	if (rt->initialized && rt->card_index == card_index) {
+		rt->capture->set_pixel_format(pixel_format);
+		return;
+	}
+
+	bmusb_cleanup(rt);
+
+	rt->card_index = card_index;
+	if (card_index >= BMUSBCapture::num_cards()) {
+		std::cerr << "Invalid card index: " << card_index << std::endl;
+		return;
+	}
+	rt->capture = new BMUSBCapture(card_index);
+	rt->capture->set_pixel_format(pixel_format);
 	rt->capture->set_frame_callback(
 		[rt](uint16_t timecode,
 			FrameAllocator::Frame video_frame, size_t video_offset, VideoFormat video_format,
@@ -77,7 +100,11 @@ static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
 				struct obs_source_frame frame{};
 				frame.width = video_format.width;
 				frame.height = video_format.height;
-				frame.format = VIDEO_FORMAT_UYVY;
+				if (rt->capture->get_current_pixel_format() == bmusb::PixelFormat_10BitYCbCr) {
+					frame.format = VIDEO_FORMAT_V210;
+				} else {
+					frame.format = VIDEO_FORMAT_UYVY;
+				}
 				frame.linesize[0] = video_format.stride;
 				frame.data[0] = video_frame.data + video_offset + video_format.extra_lines_top * video_format.stride;
 				frame.timestamp = cur_time;
@@ -118,8 +145,37 @@ static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
 	rt->capture->start_bm_capture();
 
 	rt->initialized = true;
+}
+
+static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
+{
+	struct bmusb_inst *rt = (bmusb_inst *)bzalloc(sizeof(struct bmusb_inst));
+	rt->source = source;
+
+	bmusb_update(rt, settings);
 
 	return rt;
+}
+
+static void bmusb_get_defaults(obs_data_t *settings)
+{
+	obs_data_set_default_int(settings, S_CARD_INDEX, 0);
+	obs_data_set_default_int(settings, S_PIXEL_FORMAT, bmusb::PixelFormat_8BitYCbCr);
+}
+
+static obs_properties_t *bmusb_get_properties(void *unused)
+{
+	UNUSED_PARAMETER(unused);
+	obs_properties_t *props = obs_properties_create();
+
+	obs_properties_add_int(props, S_CARD_INDEX, "Card Index", 0, 8, 1);
+
+	obs_property_t *list = obs_properties_add_list(props, S_PIXEL_FORMAT, "Pixel Format",
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(list, "8-bit YCbCr (UYVY)", bmusb::PixelFormat_8BitYCbCr);
+	obs_property_list_add_int(list, "10-bit YCbCr (v210)", bmusb::PixelFormat_10BitYCbCr);
+
+	return props;
 }
 
 struct obs_source_info bmusb_source_info = {
@@ -129,6 +185,10 @@ struct obs_source_info bmusb_source_info = {
 	.get_name     = bmusb_getname,
 	.create       = bmusb_create,
 	.destroy      = bmusb_destroy,
+	.get_defaults = bmusb_get_defaults,
+	.get_properties = bmusb_get_properties,
+	.update       = bmusb_update,
+	.icon_type    = OBS_ICON_TYPE_CAMERA,
 };
 
 OBS_DECLARE_MODULE()
