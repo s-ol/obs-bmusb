@@ -14,6 +14,8 @@ using bmusb::AudioFormat;
 
 #define S_CARD_INDEX "card_index"
 #define S_PIXEL_FORMAT "pixel_format"
+#define S_VIDEO_INPUT "video_input"
+#define S_AUDIO_INPUT "audio_input"
 
 /* 
  * Workaround for bmusb library limitation:
@@ -92,9 +94,19 @@ static void bmusb_update(void *data, obs_data_t *settings)
 	struct bmusb_inst *rt = (struct bmusb_inst *)data;
 	int card_index = (int)obs_data_get_int(settings, S_CARD_INDEX);
 	bmusb::PixelFormat pixel_format = (bmusb::PixelFormat)obs_data_get_int(settings, S_PIXEL_FORMAT);
+	uint32_t video_input = obs_data_get_int(settings, S_VIDEO_INPUT);
+	uint32_t audio_input = obs_data_get_int(settings, S_AUDIO_INPUT);
 
 	if (rt->capture && rt->card_index == card_index) {
-		rt->capture->set_pixel_format(pixel_format);
+		if (pixel_format != rt->capture->get_current_pixel_format()) {
+			rt->capture->set_pixel_format(pixel_format);
+		}
+		if (video_input != rt->capture->get_current_video_input()) {
+			rt->capture->set_video_input(video_input);
+		}
+		if (audio_input != rt->capture->get_current_audio_input()) {
+			rt->capture->set_audio_input(audio_input);
+		}
 		return;
 	}
 
@@ -195,19 +207,37 @@ static void bmusb_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_int(settings, S_CARD_INDEX, 0);
 	obs_data_set_default_int(settings, S_PIXEL_FORMAT, bmusb::PixelFormat_8BitYCbCr);
+	obs_data_set_default_int(settings, S_VIDEO_INPUT, 0);
+	obs_data_set_default_int(settings, S_AUDIO_INPUT, 0);
 }
 
-static obs_properties_t *bmusb_get_properties(void *unused)
+static obs_properties_t *bmusb_get_properties(void* data)
 {
-	UNUSED_PARAMETER(unused);
+	struct bmusb_inst *rt = (struct bmusb_inst *)data;
 	obs_properties_t *props = obs_properties_create();
 
 	obs_properties_add_int(props, S_CARD_INDEX, "Card Index", 0, 8, 1);
 
-	obs_property_t *list = obs_properties_add_list(props, S_PIXEL_FORMAT, "Pixel Format",
+	obs_property_t *pix_fmt_list = obs_properties_add_list(props, S_PIXEL_FORMAT, "Pixel Format",
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	obs_property_list_add_int(list, "8-bit YCbCr (UYVY)", bmusb::PixelFormat_8BitYCbCr);
-	obs_property_list_add_int(list, "10-bit YCbCr (v210)", bmusb::PixelFormat_10BitYCbCr);
+	obs_property_list_add_int(pix_fmt_list, "8-bit YCbCr (UYVY)", bmusb::PixelFormat_8BitYCbCr);
+	obs_property_list_add_int(pix_fmt_list, "10-bit YCbCr (v210)", bmusb::PixelFormat_10BitYCbCr);
+
+	obs_property_t *vid_inp_list = obs_properties_add_list(props, S_VIDEO_INPUT, "Video Input",
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	if (rt && rt->capture) {
+		for (const auto& inp : rt->capture->get_available_video_inputs()) {
+			obs_property_list_add_int(vid_inp_list, inp.second.c_str(), inp.first);
+		}
+	}
+	
+	obs_property_t *aud_inp_list = obs_properties_add_list(props, S_AUDIO_INPUT, "Audio Input",
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	if (rt && rt->capture) {
+		for (const auto& inp : rt->capture->get_available_audio_inputs()) {
+			obs_property_list_add_int(aud_inp_list, inp.second.c_str(), inp.first);
+		}
+	}
 
 	return props;
 }
