@@ -15,6 +15,7 @@ using bmusb::AudioFormat;
 #define S_CARD_INDEX "card_index"
 #define S_PIXEL_FORMAT "pixel_format"
 #define S_VIDEO_INPUT "video_input"
+#define S_VIDEO_MODE "video_mode"
 #define S_AUDIO_INPUT "audio_input"
 
 /* 
@@ -96,6 +97,7 @@ static void bmusb_update(void *data, obs_data_t *settings)
 	int card_index = (int)obs_data_get_int(settings, S_CARD_INDEX);
 	bmusb::PixelFormat pixel_format = (bmusb::PixelFormat)obs_data_get_int(settings, S_PIXEL_FORMAT);
 	uint32_t video_input = obs_data_get_int(settings, S_VIDEO_INPUT);
+	uint32_t video_mode = obs_data_get_int(settings, S_VIDEO_MODE);
 	uint32_t audio_input = obs_data_get_int(settings, S_AUDIO_INPUT);
 
 	if (rt->capture && rt->card_index == card_index) {
@@ -104,6 +106,9 @@ static void bmusb_update(void *data, obs_data_t *settings)
 		}
 		if (video_input != rt->capture->get_current_video_input()) {
 			rt->capture->set_video_input(video_input);
+		}
+		if (video_mode != rt->capture->get_current_video_mode()) {
+			rt->capture->set_video_mode(video_mode);
 		}
 		if (audio_input != rt->capture->get_current_audio_input()) {
 			rt->capture->set_audio_input(audio_input);
@@ -122,6 +127,7 @@ static void bmusb_update(void *data, obs_data_t *settings)
 
 	rt->capture->set_pixel_format(pixel_format);
 	rt->capture->set_video_input(video_input);
+	rt->capture->set_video_mode(video_mode);
 	rt->capture->set_audio_input(audio_input);
 	rt->capture->set_frame_callback(
 		[rt](uint16_t timecode,
@@ -129,6 +135,13 @@ static void bmusb_update(void *data, obs_data_t *settings)
 			FrameAllocator::Frame audio_frame, size_t audio_offset, AudioFormat audio_format
 		) {
 			uint64_t cur_time = os_gettime_ns();
+
+			if (!video_format.is_connected) {
+				std::cerr << "Input unconnected, dropping frame" << std::endl;
+				rt->capture->get_video_frame_allocator()->release_frame(video_frame);
+				rt->capture->get_audio_frame_allocator()->release_frame(audio_frame);
+				return;
+			}
 
 			if (!video_format.has_signal) {
 				std::cerr << "Video has no signal, dropping frame" << std::endl;
@@ -240,7 +253,7 @@ static obs_properties_t *bmusb_get_properties(void* data)
 	struct bmusb_inst *rt = (struct bmusb_inst *)data;
 	obs_properties_t *props = obs_properties_create();
 
-	obs_properties_add_int(props, S_CARD_INDEX, "Card Index", 0, 8, 1);
+	obs_properties_add_int(props, S_CARD_INDEX, "Card Index", 0, BMUSBCapture::num_cards() - 1, 1);
 
 	obs_property_t *pix_fmt_list = obs_properties_add_list(props, S_PIXEL_FORMAT, "Pixel Format",
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
@@ -249,15 +262,19 @@ static obs_properties_t *bmusb_get_properties(void* data)
 
 	obs_property_t *vid_inp_list = obs_properties_add_list(props, S_VIDEO_INPUT, "Video Input",
 						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_t *vid_mode_list = obs_properties_add_list(props, S_VIDEO_MODE, "Video Mode",
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_t *aud_inp_list = obs_properties_add_list(props, S_AUDIO_INPUT, "Audio Input",
+						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
 	if (rt && rt->capture) {
 		for (const auto& inp : rt->capture->get_available_video_inputs()) {
 			obs_property_list_add_int(vid_inp_list, inp.second.c_str(), inp.first);
 		}
-	}
 	
-	obs_property_t *aud_inp_list = obs_properties_add_list(props, S_AUDIO_INPUT, "Audio Input",
-						       OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
-	if (rt && rt->capture) {
+		for (auto const& it : rt->capture->get_available_video_modes()) {
+			obs_property_list_add_int(vid_mode_list, it.second.name.c_str(), it.first);
+		}
+
 		for (const auto& inp : rt->capture->get_available_audio_inputs()) {
 			obs_property_list_add_int(aud_inp_list, inp.second.c_str(), inp.first);
 		}
