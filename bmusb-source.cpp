@@ -55,6 +55,7 @@ struct bmusb_inst {
 	obs_source_t            *source;
 	BMUSBCapture            *capture;
 	int                     card_index;
+	std::vector<uint8_t>    buffer;
 };
 
 static const char *bmusb_getname(void *unused)
@@ -134,13 +135,6 @@ static void bmusb_update(void *data, obs_data_t *settings)
 				return;
 			}
 
-			if (video_format.interlaced) {
-				std::cerr << "Video is interlaced, dropping frame" << std::endl;
-				rt->capture->get_video_frame_allocator()->release_frame(video_frame);
-				rt->capture->get_audio_frame_allocator()->release_frame(audio_frame);
-				return;
-			}
-
 			if (video_frame.interleaved) {
 				std::cerr << "Video is interleaved, dropping frame" << std::endl;
 				rt->capture->get_video_frame_allocator()->release_frame(video_frame);
@@ -159,8 +153,35 @@ static void bmusb_update(void *data, obs_data_t *settings)
 					frame.format = VIDEO_FORMAT_UYVY;
 				}
 				frame.linesize[0] = video_format.stride;
-				frame.data[0] = video_frame.data + video_offset + video_format.extra_lines_top * video_format.stride;
 				frame.timestamp = cur_time;
+
+				if (video_format.interlaced && video_format.second_field_start != 1) {
+					size_t buffer_size = video_format.stride * video_format.height;
+			    rt->buffer.resize(buffer_size);
+
+					uint8_t *source = video_frame.data + video_offset + video_format.extra_lines_top * video_format.stride;
+					uint8_t *dest = rt->buffer.data();
+					uint8_t *end = dest + video_format.height * video_format.stride;
+					while (dest < end) {
+						memcpy(dest, source, video_format.stride);
+						source += video_format.stride;
+						dest += 2 * video_format.stride;
+					}
+
+					source = video_frame.data + video_offset + video_format.second_field_start * video_format.stride;
+					dest = rt->buffer.data() + video_format.stride;
+					while (dest < end) {
+						memcpy(dest, source, video_format.stride);
+						source += video_format.stride;
+						dest += 2 * video_format.stride;
+					}
+
+					frame.data[0] = rt->buffer.data();
+				} else {
+			    rt->buffer.resize(0);
+					frame.data[0] = video_frame.data + video_offset + video_format.extra_lines_top * video_format.stride;
+				}
+
 				video_format_get_parameters_for_format(VIDEO_CS_SRGB, VIDEO_RANGE_FULL, frame.format, frame.color_matrix, frame.color_range_min, frame.color_range_max);
 				obs_source_output_video(rt->source, &frame);
 			}
@@ -197,6 +218,7 @@ static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct bmusb_inst *rt = (bmusb_inst *)bzalloc(sizeof(struct bmusb_inst));
 	rt->source = source;
+	rt->buffer = std::vector<uint8_t>();
 
 	bmusb_update(rt, settings);
 
