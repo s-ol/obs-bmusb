@@ -121,6 +121,8 @@ static void bmusb_update(void *data, obs_data_t *settings)
 	}
 
 	rt->capture->set_pixel_format(pixel_format);
+	rt->capture->set_video_input(video_input);
+	rt->capture->set_audio_input(audio_input);
 	rt->capture->set_frame_callback(
 		[rt](uint16_t timecode,
 			FrameAllocator::Frame video_frame, size_t video_offset, VideoFormat video_format,
