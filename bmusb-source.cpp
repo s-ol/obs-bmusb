@@ -57,6 +57,7 @@ struct bmusb_inst {
 	BMUSBCapture            *capture;
 	int                     card_index;
 	std::vector<uint8_t>    buffer;
+	std::vector<int32_t>    audio_buffer;
 };
 
 static const char *bmusb_getname(void *unused)
@@ -210,7 +211,20 @@ static void bmusb_update(void *data, obs_data_t *settings)
 					(audio_frame.len - audio_offset) / audio_format.num_channels /
 					(audio_format.bits_per_sample / 8) : 0;
 				audio.format = AUDIO_FORMAT_32BIT;
-				audio.data[0] = audio_frame.data + audio_offset;
+				if (audio_format.bits_per_sample == 24) {
+					size_t num_samples = (size_t)audio.frames * audio_format.num_channels;
+					rt->audio_buffer.resize(num_samples);
+
+					uint8_t *src = audio_frame.data + audio_offset;
+					for (size_t i = 0; i < num_samples; i++, src += 3) {
+						uint32_t raw = (uint32_t)src[0] | ((uint32_t)src[1] << 8) | ((uint32_t)src[2] << 16);
+						rt->audio_buffer[i] = (int32_t)(raw << 8);
+					}
+					audio.data[0] = (uint8_t *)rt->audio_buffer.data();
+				} else {
+					rt->audio_buffer.resize(0);
+					audio.data[0] = audio_frame.data + audio_offset;
+				}
 				audio.timestamp = cur_time;
 				switch (audio_format.num_channels) {
 					case 1: audio.speakers = SPEAKERS_MONO; break;
@@ -234,6 +248,7 @@ static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
 	struct bmusb_inst *rt = (bmusb_inst *)bzalloc(sizeof(struct bmusb_inst));
 	rt->source = source;
 	rt->buffer = std::vector<uint8_t>();
+	rt->audio_buffer = std::vector<int32_t>();
 
 	bmusb_update(rt, settings);
 
